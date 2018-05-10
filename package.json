@@ -1,0 +1,12 @@
+{
+  "name": "create-react-app",
+  "version": "1.0.0",
+  "description": "personal",
+  "main": "index.js",
+  "author": "Ace <starbaby0414@163.com>",
+  "license": "MIT",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ]
+}
