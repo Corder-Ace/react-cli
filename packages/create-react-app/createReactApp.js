@@ -39,7 +39,7 @@ const program = new commander.Command(packageJson.name)
     .option('--info', '打印本地开发环境信息')
     .option(
         '--scripts-version <alternative-package>',
-        '指定react-scripts'
+        '指定react-scripts版本'
     )
     .option('--use-npm') //是否使用npm 默认使用yarn
     .allowUnknownOption() //允许无效的option
@@ -227,7 +227,7 @@ function createApp(name, verbose, version, useNpm, template) {
         }
         version = 'react-scripts@0.9.x';
     }
-
+    //
     run(root, appName, version, verbose, originalDirectory, template, useYarn);
 }
 
@@ -396,3 +396,242 @@ function checkNpmVersion() {
         npmVersion: npmVersion,
     };
 }
+
+//运行
+function run(root,
+    appName,
+    version,
+    verbose,
+    originalDirectory,
+    template,
+    useYarn) {
+    const packageToInstall = getInstallPackage(version, originalDirectory);// 获取依赖包信息
+    const allDependencies = ['react', 'react-dom', packageToInstall]; // 所有的开发依赖包
+
+    console.log('正在安装依赖,这可能需要几分钟,请稍后...');
+
+    //获取依赖包的原始名称并返回
+    getPackageName(packageToInstall)
+        .then(packageName =>
+            //检查是否是离线模式
+            checkIfOnline(useYarn)
+                .then(isOnline => ({
+                    isOnline: isOnline,
+                    packageName: packageName,
+                }))
+        )
+        .then(info => {
+            //接收到上述结果
+            const isOnline = info.isOnline;
+            const packageName = info.packageName;
+            console.log(
+                `
+                正在安装
+                ${chalk.cyan('react')},
+                ${chalk.cyan('react-dom')},
+                ${chalk.cyan(packageName)}...
+                `
+            );
+            console.log();
+            //安装依赖
+            return install(root, useYarn, allDependencies, verbose, isOnline)
+                .then(() => packageName);
+        })
+        .then(packageName => {
+            // 检查当前Node版本是否支持包 
+            checkNodeVersion(packageName);
+            // 检查package.json的开发依赖是否正常
+            setCaretRangeForRuntimeDeps(packageName);
+            // `react-scripts`脚本的目录
+            const scriptsPath = path.resolve(
+                process.cwd(),
+                'node_modules',
+                packageName,
+                'scripts',
+                'init.js'
+            );
+            const init = require(scriptsPath);
+            //执行目录的拷贝
+            init(root, appName, verbose, originalDirectory, template);
+            //当react-script的版本为0.9.x时发出警告
+            if (version === 'react-scripts@0.9.x') {
+                console.log(
+                    chalk.yellow(`您正在使用一个旧的不受支持的工具来引导,请更新您的Node>=6和npm>=3`)
+                )
+            }
+        })
+        //异常处理
+        .catch(resson => { })
+}
+/**
+ * @version 版本号
+ * @originalDirectory 原始目录
+ */
+function getInstallPackage(version, originalDirectory) {
+    let packageToInstall = 'react-scripts'//定义要安装的常量
+    const validSemver = semver.valid(version);//校验版本号是否合法
+
+    if (validSemver) {
+        packageToInstall += `@${validSemver}`//合法的话执行，就安装指定版本
+    } else if (version && version.match(/^file:/)) {
+        // 不合法并且版本号参数带有`file:`执行以下代码，作用是指定安装包为我们自身定义的包
+        packageToInstall = `file:${path.resolve(
+            originalDirectory,
+            version.match(/^file:(.*)?$/)[1]
+        )}`;
+    } else if (version) {
+        // 不合法并且没有`file:`开头，默认为在线的`tar.gz`文件
+        packageToInstall = version;
+    }
+}
+/**
+ * 返回一个正常的依赖包名
+ * @param {*} installPackage 包名
+ */
+function getPackageName(installPackage) {
+    if (installPackage.match(/^.+\.(tgz|tar\.gz)$/)) {
+        return getTemporaryDirectory()
+            .then(obj => {
+                let stream;
+                if (/^http/.test(installPackage)) {
+                    //hyperquest:用于将http请求流媒体传输
+                    stream = hyperquest(installPackage);
+                } else {
+                    stream = fs.createReadStream(installPackage);
+                }
+                return extractStream(stream, obj.tmpdir).then(() => obj);
+            })
+            .then(obj => {
+                const packageName = require(path.join(obj.tmpdir, 'package.json')).name;
+                obj.cleanup();
+                return packageName;
+            })
+            .catch(err => {
+                console.log(`无法提取包名:${err.message}`)
+                const assumedProjectName = installPackage.match(
+                    /^.+\/(.+?)(?:-\d+.+)?\.(tgz|tar\.gz)$/
+                )[1];
+                console.log(
+                    `根据文件名, 如果它是 "${chalk.cyan(
+                        assumedProjectName
+                    )}"`
+                );
+                return Promise.resolve(assumedProjectName);
+            })
+    } else if (installPackage.indexOf('git+') === 0) {
+        return Promise.resolve(installPackage.match(/([^/]+)\.git(#.*)?$/)[1]);
+        // 此处为只有版本信息的时候的情况
+    } else if (installPackage.match(/.+@/)) {
+        return Promise.resolve(
+            installPackage.charAt(0) + installPackage.substr(1).split('@')[0]
+        );
+        // 此处为信息中包含`file:`开头的情况
+    } else if (installPackage.match(/^file:/)) {
+        const installPackagePath = installPackage.match(/^file:(.*)?$/)[1];
+        const installPackageJson = require(path.join(installPackagePath, 'package.json'));
+        return Promise.resolve(installPackageJson.name);
+    }
+    // 什么都没有直接返回包名
+    return Promise.resolve(installPackage);
+}
+
+/**
+ * 检查是否使用离线安装 Yarn才有离线安装 
+ * @param boolean useYarn 
+ * @param dns 用来检测是否能够请求到指定的地址
+ */
+function checkIfOnline(useYarn) {
+    if (!useYarn) {
+        return Promise.resolve(true)
+    }
+
+    return new Promise(resolve => {
+        dns.lookup('registry.yarnpkg.com', err => {
+            let proxy;
+            if (err != null && (proxy = getProxy())) {
+                dns.lookup(url.parse(proxy).hostname, proxyErr => {
+                    resolve(proxyErr == null);
+                });
+            } else {
+                resolve(err == null);
+            }
+        })
+    })
+}
+/**
+ * 
+ * @param {String} root 目录
+ * @param {Boolean} useYarn 是否使用Yarn
+ * @param {Array} dependencies 依赖
+ * @param {String} verbose 
+ * @param {Boolean} isOnline 
+ */
+function install(root, useYarn, dependencies, verbose, isOnline) {
+    return new Promise((resolve, reject) => {
+        let command;//定义一个命令
+        let args; //定义一个命令参数
+
+        //如果使用Yarn
+        if (useYarn) {
+            command = 'yarnpkg';//命令名称
+            args = ['add', '--exact'];//命令参数的基础
+            if (!isOnline) {
+                args.push('--offline');//在args基础上增加离线模式
+            }
+            [].push.apply(args, dependencies);//组合参数和开发依赖 react react-dom react-scripts
+            args.push('--cwd');//指定命令执行目录的地址
+            args.push(root);//地址的绝对路径
+            //在使用离线模式时会发出警告
+            if (!isOnline) {
+                console.log(chalk.yellow('脱机模式'));
+                console.log(chalk.yellow('使用缓存'));
+                console.log();
+            }
+        } else {
+            //此处和上述一样,命令定义,参数组合
+            command = 'npm';
+            args = [
+                'install',
+                '--save',
+                '--save-exact',
+                '--loglevel',
+                'error',
+            ].concat(dependencies)
+        }
+        if (verbose) {
+            args.push('--verbose');
+        }
+        console.log(args)
+        // 这里就把命令组合起来执行
+        const child = spawn(command, args, { stdio: 'inherit' });
+        child.on('close', code => {
+            //code为0代表正常关闭,不为0就打印错误
+            if (code !== 0) {
+                reject({
+                    command: `${command} ${args.join(' ')}`,
+                });
+                return;
+            }
+            //正常继续往下执行
+            resolve();
+        })
+    })
+}
+/**
+ * 检查Node版本 react-scripts 依赖Node
+ * @param {String} packageName 
+ */
+function checkNodeVersion(packageName) {
+    //找到react-scripts的package.json路径
+    const packageJsonPath = path.resolve(
+        process.cwd(),
+        'node_modules',
+        packageName,
+        'package.json'
+    )
+    console.log(packageJsonPath);
+    //引入react-scripts的package.json
+    const packageJson = require(packageJsonPath);
+}
+
+
