@@ -438,6 +438,7 @@ function run(root,
                 .then(() => packageName);
         })
         .then(packageName => {
+            console.log('------------------------123')
             // 检查当前Node版本是否支持包 
             checkNodeVersion(packageName);
             // 检查package.json的开发依赖是否正常
@@ -450,6 +451,8 @@ function run(root,
                 'scripts',
                 'init.js'
             );
+            console.log('---------------------------');
+            console.log(scriptsPath)
             const init = require(scriptsPath);
             //执行目录的拷贝
             init(root, appName, verbose, originalDirectory, template);
@@ -483,6 +486,7 @@ function getInstallPackage(version, originalDirectory) {
         // 不合法并且没有`file:`开头，默认为在线的`tar.gz`文件
         packageToInstall = version;
     }
+    return packageToInstall;
 }
 /**
  * 返回一个正常的依赖包名
@@ -629,9 +633,73 @@ function checkNodeVersion(packageName) {
         packageName,
         'package.json'
     )
-    console.log(packageJsonPath);
     //引入react-scripts的package.json
     const packageJson = require(packageJsonPath);
+    //engines中记录了对node版本的要求
+    if (!packageJson.engines || !packageJson.engines.node) {
+        return;
+    }
+    //对比版本,如果版本不符合engines要求则给出提示并退出进程
+    if (!semver.satisfies(process.version, packageJson.engines.node)) {
+        console.error(
+            chalk.red(
+                `您的Node不支持React App,请更新至6.0以上`
+            ),
+            process.version,
+            packageJson.engines.node
+        );
+        process.exit(1);
+    }
 }
+/**
+ * 用来检测之前安装的依赖是否正确的写入了package.json
+ * @param {} packageName 
+ */
+function setCaretRangeForRuntimeDeps(packageName) {
+    const packagePath = path.join(process.cwd(), 'package.json');//项目目录的package.json的路径
+    const packageJson = require(packagePath);
+
+    if (typeof packageJson.dependencies === 'undefined') {
+        console.log(chalk.red('package.json中不存在依赖'));
+        process.exit(1);
+    }
+
+    //依赖
+    const packageVersion = packageJson.dependencies[packageName];
+    if (typeof packageVersion === 'undefined') {
+        console.error(chalk.red(`在package.json中没有找到 ${packageName}`))
+        process.exit(1);
+    }
+
+    //检查react react-dom的版本
+    makeCaretRange(packageJson.dependencies, 'react');
+    makeCaretRange(packageJson.dependencies, 'react-dom');
+    //重新写入文件
+    fs.writeFileSync(packagePath, JSON.stringify(packageJson, null, 2));
+}
+
+/**
+ * 检查依赖版本
+ * @param {Object} dependencies 
+ * @param {String} name 
+ */
+function makeCaretRange(dependencies, name) {
+    const version = dependencies[name];
+
+    if (typeof version === 'undefine') {
+        console.log(chart.red(`${name} 没有正确的写入package.json`));
+        process.exit(1);
+    }
+
+    let patchedVersion = `^${version}`;
+    if (!semver.validRange(patchedVersion)) {
+        console.error(
+            `无法安装${name},因为版本${chalk.red(version)}即将失效${chalk.red(patchedVersion)}`
+        );
+        patchedVersion = version;
+    }
+    dependencies[name] = patchedVersion;
+}
+
 
 
